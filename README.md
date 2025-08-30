@@ -1,6 +1,6 @@
 # Payroll Script
 
-ERC20 token payroll distribution script that validates balances, shows previews, and executes batch payments.
+ERC20 token payroll distribution script that validates balances and wallets, shows previews, and executes multiple payments.
 
 ## Setup
 
@@ -24,20 +24,21 @@ cp .env.example .env
 ## Usage
 
 ```bash
-npm start example-payroll.txt
+npm start payroll-file.txt
 ```
 
 ## Input File Format
 
-Tab-separated values with amount and wallet address:
+Tab-separated values with amount and wallet address (make sure to use tabs and not spaces):
 ```
-5153.34	0x12c60D7f3153523689c83FaD4c8482B637976765
-3845.62	0x48a906fcB66Caf68ea3fDd8054309d9F0C268735
+5153.34	0x55e9877c8e66801313607396e7e563391753f800
+3845.62	0x2f54f55f498e8db00e35d6a0563c8cb682567e1b
 ```
 
 ## Features
 
 - ✅ Balance validation before execution
+- ✅ Wallet validation before execution
 - ✅ Transaction preview with confirmation
 - ✅ Individual transaction status with explorer links
 - ✅ Final execution summary
