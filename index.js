@@ -44,11 +44,14 @@ async function main() {
       process.env.TOKEN_CONTRACT_ADDRESS
     );
     
-    console.log('📊 Fetching token information and wallet balance...\n');
+    console.log('📊 Fetching token information, wallet balance, and validating recipients...\n');
     
-    const [tokenInfo, balance] = await Promise.all([
+    const addresses = transactions.map(tx => tx.address);
+    
+    const [tokenInfo, balance, walletValidations] = await Promise.all([
       walletManager.getTokenInfo(),
-      walletManager.getBalance()
+      walletManager.getBalance(),
+      walletManager.validateRecipientWallets(addresses)
     ]);
     
     const totalAmount = getTotalAmount(transactions);
@@ -66,7 +69,8 @@ async function main() {
       transactions,
       tokenInfo.symbol,
       walletManager.getAddress(),
-      balance.formatted
+      balance.formatted,
+      walletValidations
     );
     
     const shouldProceed = await askForConfirmation('Do you want to proceed with these transactions? (y/n): ');

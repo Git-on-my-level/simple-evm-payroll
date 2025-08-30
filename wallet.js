@@ -43,6 +43,33 @@ export class WalletManager {
     return tx;
   }
 
+  async checkWalletActivity(address) {
+    const [balance, nonce] = await Promise.all([
+      this.provider.getBalance(address),
+      this.provider.getTransactionCount(address)
+    ]);
+    
+    return {
+      hasNativeBalance: balance > 0n,
+      nonce: nonce,
+      isActive: balance > 0n || nonce > 0
+    };
+  }
+
+  async validateRecipientWallets(addresses) {
+    const validations = await Promise.all(
+      addresses.map(async (address) => {
+        const activity = await this.checkWalletActivity(address);
+        return {
+          address,
+          ...activity
+        };
+      })
+    );
+    
+    return validations;
+  }
+
   getAddress() {
     return this.wallet.address;
   }
