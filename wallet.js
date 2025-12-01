@@ -1,5 +1,10 @@
 import { ethers } from 'ethers';
 
+// Fix JavaScript floating-point precision errors before passing to ethers.parseUnits()
+function toFixedDecimals(amount, decimals) {
+  return amount.toFixed(decimals);
+}
+
 const ERC20_ABI = [
   "function balanceOf(address owner) view returns (uint256)",
   "function transfer(address to, uint256 amount) returns (bool)",
@@ -33,12 +38,12 @@ export class WalletManager {
 
   async checkSufficientFunds(totalAmount, decimals) {
     const balance = await this.getBalance();
-    const totalRequired = ethers.parseUnits(totalAmount.toString(), decimals);
+    const totalRequired = ethers.parseUnits(toFixedDecimals(totalAmount, decimals), decimals);
     return balance.raw >= totalRequired;
   }
 
   async sendToken(toAddress, amount, decimals) {
-    const amountWei = ethers.parseUnits(amount.toString(), decimals);
+    const amountWei = ethers.parseUnits(toFixedDecimals(amount, decimals), decimals);
     const tx = await this.tokenContract.transfer(toAddress, amountWei);
     return tx;
   }
