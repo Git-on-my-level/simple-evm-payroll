@@ -1,4 +1,15 @@
-.claude
-node_modules
+node_modules/
 .env
+.env.*
+!.env.example
+
+# Real recipient lists may contain sensitive payout data. Keep them local.
+# The committed example file is explicitly allowed below.
 *payroll*.txt
+recipients*.txt
+recipients*.tsv
+recipients*.csv
+!recipients.example.tsv
+
+.claude/
+.DS_Store

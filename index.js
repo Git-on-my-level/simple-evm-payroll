@@ -1,224 +1,284 @@
 #!/usr/bin/env node
 
-import dotenv from 'dotenv';
-import { WalletManager, VaultWalletManager, SDUSD_CONTRACT_ADDRESS, formatUnits, parseUnits } from './wallet.js';
+import { loadConfig } from './config.js';
+import { WalletManager, VaultWalletManager, formatUnits, parseUnits } from './wallet.js';
 import { parsePayrollFile, sumRaw } from './utils.js';
-import { displayTokenChoice, displayTransactionPreview, displayConversionPreview } from './display.js';
+import {
+  displaySkippedLines,
+  displayTokenOptions,
+  displayTransactionPreview,
+  displayConversionPreview
+} from './display.js';
 import { askForChoice, askForConfirmation } from './prompt.js';
 import { executeTransactions, displayFinalSummary } from './executor.js';
 
-dotenv.config();
+const HELP = `Simple EVM Payroll — batch-send an ERC20 token to many recipients.
 
-function requireEnvVars(names) {
-  const missingVars = names.filter(varName => !process.env[varName]);
+Usage:
+  node index.js <recipients-file> [--dry-run]
 
-  if (missingVars.length > 0) {
-    console.error('Missing required environment variables:');
-    missingVars.forEach(varName => console.error(`- ${varName}`));
-    console.error('\nPlease copy .env.example to .env and fill in the required values.');
-    process.exit(1);
+Arguments:
+  <recipients-file>   File with one "<amount> <address>" pair per line.
+                      Separators may be tab, comma, or whitespace.
+                      Blank lines and lines starting with '#' are ignored.
+
+Options:
+  --dry-run           Validate, preview, and price everything without sending
+                      any transactions.
+  -h, --help          Show this help.
+
+Configuration is read from environment variables (see .env.example).`;
+
+function parseArgs(argv) {
+  const args = { file: null, dryRun: false, help: false };
+  for (const arg of argv) {
+    if (arg === '-h' || arg === '--help') args.help = true;
+    else if (arg === '--dry-run') args.dryRun = true;
+    else if (!args.file) args.file = arg;
   }
+  return args;
 }
 
-async function buildDUsdTransactions(transactions, dUsdInfo) {
-  return transactions.map(tx => {
-    const inputRaw = parseUnits(tx.amountText, dUsdInfo.decimals);
+/**
+ * Converts each parsed row into base units of the asset. Throws a clear,
+ * row-attributed error if an amount cannot be represented at the token's
+ * precision (e.g. too many decimal places).
+ */
+function buildAssetTransactions(transactions, assetInfo) {
+  return transactions.map((tx) => {
+    let inputRaw;
+    try {
+      inputRaw = parseUnits(tx.amountText, assetInfo.decimals);
+    } catch {
+      throw new Error(
+        `Amount "${tx.amountText}" for ${tx.address} has more precision than ` +
+        `${assetInfo.symbol} supports (${assetInfo.decimals} decimals).`
+      );
+    }
     return {
       ...tx,
       inputRaw,
       payoutRaw: inputRaw,
-      inputFormatted: formatUnits(inputRaw, dUsdInfo.decimals),
-      payoutFormatted: formatUnits(inputRaw, dUsdInfo.decimals)
+      inputFormatted: formatUnits(inputRaw, assetInfo.decimals),
+      payoutFormatted: formatUnits(inputRaw, assetInfo.decimals)
     };
   });
 }
 
-async function buildSdUsdTransactions(transactions, dUsdInfo, sdUsdInfo, sdUsdManager) {
-  return Promise.all(transactions.map(async (tx) => {
-    const inputRaw = parseUnits(tx.amountText, dUsdInfo.decimals);
-    const payoutRaw = await sdUsdManager.previewDeposit(inputRaw);
-    return {
-      ...tx,
-      inputRaw,
-      payoutRaw,
-      inputFormatted: formatUnits(inputRaw, dUsdInfo.decimals),
-      payoutFormatted: formatUnits(payoutRaw, sdUsdInfo.decimals)
-    };
-  }));
+async function buildVaultTransactions(transactions, assetInfo, vaultInfo, vaultManager) {
+  const assetTransactions = buildAssetTransactions(transactions, assetInfo);
+  return Promise.all(
+    assetTransactions.map(async (tx) => {
+      const payoutRaw = await vaultManager.previewDeposit(tx.inputRaw);
+      return {
+        ...tx,
+        payoutRaw,
+        payoutFormatted: formatUnits(payoutRaw, vaultInfo.decimals)
+      };
+    })
+  );
 }
 
 async function main() {
-  const payrollFile = process.argv[2];
+  const { file, dryRun, help } = parseArgs(process.argv.slice(2));
 
-  if (!payrollFile) {
-    console.error('Usage: node index.js <payroll-file.txt>');
-    console.error('Example: node index.js example-payroll.txt');
+  if (help) {
+    console.log(HELP);
+    process.exit(0);
+  }
+
+  if (!file) {
+    console.error('Error: no recipients file provided.\n');
+    console.error(HELP);
     process.exit(1);
   }
 
-  requireEnvVars(['PRIVATE_KEY', 'RPC_URL', 'DUSD_CONTRACT_ADDRESS', 'EXPLORER_URL']);
+  const config = loadConfig();
 
-  const dUsdAddress = process.env.DUSD_CONTRACT_ADDRESS;
-  const sdUsdAddress = process.env.SDUSD_CONTRACT_ADDRESS || SDUSD_CONTRACT_ADDRESS;
+  console.log('🔄 Initializing payroll script...\n');
 
-  try {
-    console.log('🔄 Initializing payroll script...\n');
+  const { transactions: parsedTransactions, skipped } = parsePayrollFile(file);
+  displaySkippedLines(skipped);
 
-    const parsedTransactions = parsePayrollFile(payrollFile);
+  if (parsedTransactions.length === 0) {
+    console.error('\nNo valid transactions found in the recipients file.');
+    process.exit(1);
+  }
 
-    if (parsedTransactions.length === 0) {
-      console.error('No valid transactions found in the payroll file.');
-      process.exit(1);
-    }
+  const assetManager = new WalletManager(config.privateKey, config.rpcUrl, config.tokenAddress, {
+    gasOverrides: config.gasOverrides
+  });
 
-    const dUsdManager = new WalletManager(process.env.PRIVATE_KEY, process.env.RPC_URL, dUsdAddress);
+  await assetManager.assertChainId(config.chainId);
 
-    console.log('📊 Fetching dUSD information, balance, and validating recipients...\n');
+  console.log('📊 Fetching token info, balance, and validating recipients...\n');
 
-    const addresses = parsedTransactions.map(tx => tx.address);
-    const [dUsdInfo, walletValidations] = await Promise.all([
-      dUsdManager.getTokenInfo(),
-      dUsdManager.validateRecipientWallets(addresses)
+  const addresses = parsedTransactions.map((tx) => tx.address);
+  const [assetInfo, walletValidations] = await Promise.all([
+    assetManager.getTokenInfo(),
+    assetManager.validateRecipientWallets(addresses)
+  ]);
+
+  const assetBalance = await assetManager.getBalance(assetInfo.decimals);
+
+  console.log('\n=== AVAILABLE PAYROLL TOKENS ===\n');
+  console.log(`Asset ${assetInfo.symbol} (${assetInfo.address}): ${assetBalance.formatted}`);
+
+  let payInVault = false;
+  if (config.vaultAddress) {
+    console.log(`Vault (${config.vaultAddress}): available after selection`);
+    const choice = await askForChoice(
+      `Pay in ${assetInfo.symbol} (asset) or vault shares? (a/v): `,
+      ['a', 'v']
+    );
+    payInVault = choice === 'v';
+  }
+
+  let paymentManager = assetManager;
+  let paymentInfo = assetInfo;
+  let selectedBalance = assetBalance;
+  let vaultManager = null;
+  let vaultInfo = null;
+  let vaultBalance = null;
+  let transactions = buildAssetTransactions(parsedTransactions, assetInfo);
+
+  if (payInVault) {
+    vaultManager = new VaultWalletManager(config.privateKey, config.rpcUrl, config.vaultAddress, {
+      gasOverrides: config.gasOverrides
+    });
+
+    console.log('\n📊 Fetching vault information and balance...\n');
+
+    const [fetchedVaultInfo, vaultAssetAddress] = await Promise.all([
+      vaultManager.getTokenInfo(),
+      vaultManager.getAssetAddress()
     ]);
 
-    const dUsdBalance = await dUsdManager.getBalance(dUsdInfo.decimals);
+    vaultInfo = fetchedVaultInfo;
+    vaultBalance = await vaultManager.getBalance(vaultInfo.decimals);
 
-    console.log('\n=== AVAILABLE PAYROLL TOKENS ===\n');
-    console.log(`dUSD  (${dUsdInfo.address}): ${dUsdBalance.formatted} ${dUsdInfo.symbol}`);
-    console.log(`sdUSD (${sdUsdAddress}): available after selection`);
+    displayTokenOptions({
+      assetInfo,
+      vaultInfo,
+      assetBalance,
+      vaultBalance,
+      vaultAssetAddress,
+      expectedAssetAddress: assetInfo.address
+    });
 
-    const paymentChoice = await askForChoice('Pay in dUSD or sdUSD? (d/s): ', ['d', 's']);
-    const payInSdUsd = paymentChoice === 's';
-
-    let paymentManager = dUsdManager;
-    let tokenInfo = dUsdInfo;
-    let selectedBalance = dUsdBalance;
-    let sdUsdManager = null;
-    let sdUsdInfo = null;
-    let sdUsdBalance = null;
-    let transactions = await buildDUsdTransactions(parsedTransactions, dUsdInfo);
-
-    if (payInSdUsd) {
-      sdUsdManager = new VaultWalletManager(process.env.PRIVATE_KEY, process.env.RPC_URL, sdUsdAddress);
-
-      console.log('\n📊 Fetching sdUSD vault information and balance...\n');
-
-      const [fetchedSdUsdInfo, sdUsdAssetAddress] = await Promise.all([
-        sdUsdManager.getTokenInfo(),
-        sdUsdManager.getAssetAddress()
-      ]);
-
-      sdUsdInfo = fetchedSdUsdInfo;
-      sdUsdBalance = await sdUsdManager.getBalance(sdUsdInfo.decimals);
-
-      displayTokenChoice({
-        dUsdInfo,
-        sdUsdInfo,
-        dUsdBalance,
-        sdUsdBalance,
-        sdUsdAssetAddress,
-        expectedDUsdAddress: dUsdInfo.address
-      });
-
-      if (sdUsdAssetAddress.toLowerCase() !== dUsdInfo.address.toLowerCase()) {
-        console.error('❌ Refusing to pay in sdUSD because vault asset() does not match configured dUSD.');
-        process.exit(1);
-      }
-
-      paymentManager = sdUsdManager;
-      tokenInfo = sdUsdInfo;
-      selectedBalance = sdUsdBalance;
-      transactions = await buildSdUsdTransactions(parsedTransactions, dUsdInfo, sdUsdInfo, sdUsdManager);
-    }
-
-    const totalInputRaw = sumRaw(transactions, 'inputRaw');
-    const totalPayoutRaw = sumRaw(transactions, 'payoutRaw');
-    const totalInputFormatted = formatUnits(totalInputRaw, dUsdInfo.decimals);
-    const totalPayoutFormatted = formatUnits(totalPayoutRaw, tokenInfo.decimals);
-
-    if (!payInSdUsd && dUsdBalance.raw < totalPayoutRaw) {
-      console.error('❌ Insufficient dUSD funds!');
-      console.error(`Required: ${totalPayoutFormatted} ${tokenInfo.symbol}`);
-      console.error(`Available: ${dUsdBalance.formatted} ${tokenInfo.symbol}`);
+    if (vaultAssetAddress.toLowerCase() !== assetInfo.address.toLowerCase()) {
+      console.error("❌ Refusing to pay in vault shares because the vault's asset() does not match TOKEN_ADDRESS.");
       process.exit(1);
     }
 
-    if (payInSdUsd && sdUsdBalance.raw < totalPayoutRaw) {
-      const missingSharesRaw = totalPayoutRaw - sdUsdBalance.raw;
-      const dUsdRequiredForConversionRaw = await sdUsdManager.previewMint(missingSharesRaw);
+    paymentManager = vaultManager;
+    paymentInfo = vaultInfo;
+    selectedBalance = vaultBalance;
+    transactions = await buildVaultTransactions(parsedTransactions, assetInfo, vaultInfo, vaultManager);
+  }
 
-      displayConversionPreview({
-        assetSymbol: dUsdInfo.symbol,
-        vaultSymbol: sdUsdInfo.symbol,
-        totalAssetFormatted: formatUnits(dUsdRequiredForConversionRaw, dUsdInfo.decimals),
-        totalSharesFormatted: formatUnits(missingSharesRaw, sdUsdInfo.decimals),
-        dUsdBalance,
-        sdUsdBalance
-      });
+  const totalInputRaw = sumRaw(transactions, 'inputRaw');
+  const totalPayoutRaw = sumRaw(transactions, 'payoutRaw');
+  const totalInputFormatted = formatUnits(totalInputRaw, assetInfo.decimals);
+  const totalPayoutFormatted = formatUnits(totalPayoutRaw, paymentInfo.decimals);
 
-      if (dUsdBalance.raw < dUsdRequiredForConversionRaw) {
-        console.error('❌ Insufficient funds for sdUSD payroll.');
-        console.error(`Need sdUSD shortfall: ${formatUnits(missingSharesRaw, sdUsdInfo.decimals)} ${sdUsdInfo.symbol}`);
-        console.error(`dUSD required to convert: ${formatUnits(dUsdRequiredForConversionRaw, dUsdInfo.decimals)} ${dUsdInfo.symbol}`);
-        console.error(`Available dUSD: ${dUsdBalance.formatted} ${dUsdInfo.symbol}`);
-        process.exit(1);
-      }
+  if (!payInVault && assetBalance.raw < totalPayoutRaw) {
+    console.error(`❌ Insufficient ${assetInfo.symbol} funds!`);
+    console.error(`Required: ${totalPayoutFormatted} ${paymentInfo.symbol}`);
+    console.error(`Available: ${assetBalance.formatted} ${paymentInfo.symbol}`);
+    process.exit(1);
+  }
 
-      const shouldConvert = await askForConfirmation('Convert dUSD to sdUSD before payroll? (y/n): ');
+  if (payInVault && vaultBalance.raw < totalPayoutRaw) {
+    const missingSharesRaw = totalPayoutRaw - vaultBalance.raw;
+    const assetRequiredForConversionRaw = await vaultManager.previewMint(missingSharesRaw);
+
+    displayConversionPreview({
+      assetSymbol: assetInfo.symbol,
+      vaultSymbol: vaultInfo.symbol,
+      totalAssetFormatted: formatUnits(assetRequiredForConversionRaw, assetInfo.decimals),
+      totalSharesFormatted: formatUnits(missingSharesRaw, vaultInfo.decimals),
+      assetBalance,
+      vaultBalance
+    });
+
+    if (assetBalance.raw < assetRequiredForConversionRaw) {
+      console.error('❌ Insufficient funds for vault payroll.');
+      console.error(`Vault shares shortfall: ${formatUnits(missingSharesRaw, vaultInfo.decimals)} ${vaultInfo.symbol}`);
+      console.error(`${assetInfo.symbol} required to convert: ${formatUnits(assetRequiredForConversionRaw, assetInfo.decimals)}`);
+      console.error(`Available ${assetInfo.symbol}: ${assetBalance.formatted}`);
+      process.exit(1);
+    }
+
+    if (dryRun) {
+      console.log('🔎 Dry run: would convert asset to vault shares, but skipping the deposit.');
+    } else {
+      const shouldConvert = await askForConfirmation(
+        `Convert ${assetInfo.symbol} to ${vaultInfo.symbol} before payroll? (y/n): `
+      );
       if (!shouldConvert) {
         console.log('❌ Payroll distribution cancelled.');
         process.exit(0);
       }
 
-      console.log('\n🚀 Converting dUSD to sdUSD...\n');
-      const depositTx = await sdUsdManager.deposit(dUsdManager, dUsdRequiredForConversionRaw);
+      console.log(`\n🚀 Converting ${assetInfo.symbol} to ${vaultInfo.symbol}...\n`);
+      const depositTx = await vaultManager.deposit(assetManager, assetRequiredForConversionRaw);
       console.log('Deposit submitted, waiting for confirmation...');
       const receipt = await depositTx.wait();
-      console.log(`Deposit confirmed: ${process.env.EXPLORER_URL}${receipt.hash}\n`);
+      const link = config.explorerUrl ? `${config.explorerUrl}${receipt.hash}` : receipt.hash;
+      console.log(`Deposit confirmed: ${link}\n`);
 
-      const refreshedSdUsdBalance = await sdUsdManager.getBalance(sdUsdInfo.decimals);
-      selectedBalance = refreshedSdUsdBalance;
-      if (refreshedSdUsdBalance.raw < totalPayoutRaw) {
-        console.error('❌ sdUSD balance is still insufficient after conversion. Aborting before payroll transfers.');
-        console.error(`Required: ${totalPayoutFormatted} ${sdUsdInfo.symbol}`);
-        console.error(`Available: ${refreshedSdUsdBalance.formatted} ${sdUsdInfo.symbol}`);
+      const refreshedVaultBalance = await vaultManager.getBalance(vaultInfo.decimals);
+      selectedBalance = refreshedVaultBalance;
+      // previewMint/previewDeposit rounding can leave a sub-unit shortfall; abort
+      // cleanly rather than sending a partial payroll.
+      if (refreshedVaultBalance.raw < totalPayoutRaw) {
+        console.error('❌ Vault balance is still insufficient after conversion. Aborting before payroll transfers.');
+        console.error(`Required: ${totalPayoutFormatted} ${vaultInfo.symbol}`);
+        console.error(`Available: ${refreshedVaultBalance.formatted} ${vaultInfo.symbol}`);
         process.exit(1);
       }
     }
-
-    displayTransactionPreview({
-      transactions,
-      tokenSymbol: tokenInfo.symbol,
-      senderAddress: paymentManager.getAddress(),
-      balance: selectedBalance.formatted,
-      walletValidations,
-      inputSymbol: dUsdInfo.symbol,
-      totalInputFormatted,
-      totalPayoutFormatted
-    });
-
-    const shouldProceed = await askForConfirmation('Do you want to proceed with these transactions? (y/n): ');
-
-    if (!shouldProceed) {
-      console.log('❌ Payroll distribution cancelled.');
-      process.exit(0);
-    }
-
-    console.log('\n🚀 Starting payroll distribution...\n');
-
-    const results = await executeTransactions(
-      paymentManager,
-      transactions,
-      tokenInfo,
-      process.env.EXPLORER_URL
-    );
-
-    displayFinalSummary(results, tokenInfo);
-  } catch (error) {
-    console.error('❌ Error during payroll execution:');
-    console.error(error.message);
-    process.exit(1);
   }
+
+  displayTransactionPreview({
+    transactions,
+    paymentSymbol: paymentInfo.symbol,
+    paymentDecimals: paymentInfo.decimals,
+    senderAddress: paymentManager.getAddress(),
+    balance: selectedBalance.formatted,
+    balanceRaw: selectedBalance.raw,
+    walletValidations,
+    inputSymbol: assetInfo.symbol,
+    totalInputFormatted,
+    totalPayoutFormatted,
+    totalPayoutRaw
+  });
+
+  if (dryRun) {
+    console.log('🔎 Dry run complete. No transactions were sent.');
+    process.exit(0);
+  }
+
+  const shouldProceed = await askForConfirmation('Do you want to proceed with these transactions? (y/n): ');
+
+  if (!shouldProceed) {
+    console.log('❌ Payroll distribution cancelled.');
+    process.exit(0);
+  }
+
+  console.log('\n🚀 Starting payroll distribution...\n');
+
+  const results = await executeTransactions(paymentManager, transactions, paymentInfo, config.explorerUrl);
+
+  displayFinalSummary(results, paymentInfo);
+
+  const anyFailed = results.some((r) => !r.success);
+  process.exit(anyFailed ? 1 : 0);
 }
 
-main().catch(console.error);
+main().catch((error) => {
+  console.error('❌ Error during payroll execution:');
+  console.error(error.message);
+  process.exit(1);
+});

@@ -1,7 +1,5 @@
 import { ethers } from 'ethers';
 
-export const SDUSD_CONTRACT_ADDRESS = '0x58AcC2600835211Dcb5847c5Fa422791Fd492409';
-
 const ERC20_ABI = [
   'function balanceOf(address owner) view returns (uint256)',
   'function transfer(address to, uint256 amount) returns (bool)',
@@ -32,11 +30,28 @@ export class WalletManager {
     this.provider = new ethers.JsonRpcProvider(rpcUrl);
     this.wallet = new ethers.Wallet(privateKey, this.provider);
     this.tokenAddress = tokenAddress;
+    this.gasOverrides = options.gasOverrides || {};
     this.tokenContract = new ethers.Contract(
       tokenAddress,
       options.isVault ? ERC4626_ABI : ERC20_ABI,
       this.wallet
     );
+  }
+
+  /**
+   * Verifies the RPC is connected to the expected chain. Guards against the
+   * footgun of broadcasting payroll on the wrong network.
+   */
+  async assertChainId(expectedChainId) {
+    if (expectedChainId == null) return;
+    const network = await this.provider.getNetwork();
+    const actual = Number(network.chainId);
+    if (actual !== expectedChainId) {
+      throw new Error(
+        `RPC chain ID is ${actual} but CHAIN_ID is set to ${expectedChainId}. ` +
+        'Refusing to continue to avoid sending on the wrong network.'
+      );
+    }
   }
 
   async getTokenInfo() {
@@ -60,13 +75,8 @@ export class WalletManager {
     };
   }
 
-  async checkSufficientFundsRaw(totalRequired) {
-    const balance = await this.getBalance();
-    return balance.raw >= totalRequired;
-  }
-
   async sendTokenRaw(toAddress, amountRaw) {
-    return this.tokenContract.transfer(toAddress, amountRaw);
+    return this.tokenContract.transfer(toAddress, amountRaw, this.gasOverrides);
   }
 
   async checkWalletActivity(address) {
@@ -83,17 +93,12 @@ export class WalletManager {
   }
 
   async validateRecipientWallets(addresses) {
-    const validations = await Promise.all(
-      addresses.map(async (address) => {
-        const activity = await this.checkWalletActivity(address);
-        return {
-          address,
-          ...activity
-        };
-      })
+    return Promise.all(
+      addresses.map(async (address) => ({
+        address,
+        ...(await this.checkWalletActivity(address))
+      }))
     );
-
-    return validations;
   }
 
   getAddress() {
@@ -101,9 +106,13 @@ export class WalletManager {
   }
 }
 
+/**
+ * Wallet manager for an ERC4626 vault. The vault's shares are themselves an
+ * ERC20 token (so transfers work the same), with extra deposit/preview methods.
+ */
 export class VaultWalletManager extends WalletManager {
-  constructor(privateKey, rpcUrl, vaultAddress) {
-    super(privateKey, rpcUrl, vaultAddress, { isVault: true });
+  constructor(privateKey, rpcUrl, vaultAddress, options = {}) {
+    super(privateKey, rpcUrl, vaultAddress, { ...options, isVault: true });
   }
 
   async getAssetAddress() {
@@ -118,6 +127,11 @@ export class VaultWalletManager extends WalletManager {
     return this.tokenContract.previewMint(shareAmountRaw);
   }
 
+  /**
+   * Deposits `assetAmountRaw` of the underlying asset into the vault, approving
+   * the vault to pull the asset first only when the existing allowance is too
+   * low. Returns the pending deposit transaction.
+   */
   async deposit(assetTokenManager, assetAmountRaw) {
     const allowance = await assetTokenManager.tokenContract.allowance(
       this.wallet.address,
@@ -125,12 +139,16 @@ export class VaultWalletManager extends WalletManager {
     );
 
     if (allowance < assetAmountRaw) {
-      console.log('Approving vault to pull dUSD for sdUSD deposit...');
-      const approveTx = await assetTokenManager.tokenContract.approve(this.tokenAddress, assetAmountRaw);
+      console.log('Approving vault to pull the asset for deposit...');
+      const approveTx = await assetTokenManager.tokenContract.approve(
+        this.tokenAddress,
+        assetAmountRaw,
+        this.gasOverrides
+      );
       console.log('Approval submitted, waiting for confirmation...');
       await approveTx.wait();
     }
 
-    return this.tokenContract.deposit(assetAmountRaw, this.wallet.address);
+    return this.tokenContract.deposit(assetAmountRaw, this.wallet.address, this.gasOverrides);
   }
 }

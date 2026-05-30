@@ -65,7 +65,7 @@ export function displayFinalSummary(results, tokenInfo) {
   if (successful.length > 0) {
     const totalSent = successful.reduce((sum, r) => sum + r.payoutRaw, 0n);
     console.log(`💰 Total sent: ${formatUnits(totalSent, tokenInfo.decimals)} ${tokenSymbol}`);
-    console.log(`Raw units sent: ${totalSent.toString()}`);
+    console.log(`Base units sent: ${totalSent.toString()}`);
   }
 
   if (failed.length > 0) {

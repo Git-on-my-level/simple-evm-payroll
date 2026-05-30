@@ -1,0 +1,7 @@
+# Example recipients file.
+# One "<amount> <address>" pair per line. Separators may be a tab, comma, or
+# whitespace. Blank lines and lines starting with '#' are ignored.
+# Amounts are denominated in the configured TOKEN.
+
+5153.34	0x55e9877c8e66801313607396e7e563391753f800
+3845.62	0x2f54f55f498e8db00e35d6a0563c8cb682567e1b
