@@ -8,6 +8,15 @@ export function displaySkippedLines(skipped) {
   });
 }
 
+export function displayAlreadyPaid(alreadyPaid, assetSymbol, journalPath, explorerUrl) {
+  if (alreadyPaid.length === 0) return;
+  console.log(`\n=== ALREADY PAID — SKIPPING (from ${journalPath}) ===\n`);
+  alreadyPaid.forEach((tx) => {
+    const link = explorerUrl ? `${explorerUrl}${tx.txHash}` : tx.txHash;
+    console.log(`✅ ${tx.address}: ${tx.inputFormatted} ${assetSymbol} (${link})`);
+  });
+}
+
 export function displayTokenOptions({ assetInfo, vaultInfo, assetBalance, vaultBalance, vaultAssetAddress, expectedAssetAddress }) {
   console.log('\n=== AVAILABLE PAYROLL TOKENS ===\n');
   console.log(`Asset  ${assetInfo.symbol} (${assetInfo.address}): ${assetBalance.formatted}`);

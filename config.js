@@ -63,6 +63,7 @@ export function loadConfig() {
     fail('PRIVATE_KEY is not a valid private key');
   }
 
+  const allowAnyChain = /^(1|true|yes)$/i.test(process.env.ALLOW_ANY_CHAIN?.trim() || '');
   const chainIdRaw = process.env.CHAIN_ID?.trim();
   let chainId = null;
   if (chainIdRaw) {
@@ -70,6 +71,9 @@ export function loadConfig() {
     if (!Number.isInteger(chainId) || chainId <= 0) {
       fail(`CHAIN_ID must be a positive integer, got: ${chainIdRaw}`);
     }
+  } else if (!allowAnyChain) {
+    fail('CHAIN_ID is required so the script can verify it is on the right network. ' +
+      'Set CHAIN_ID in .env, or set ALLOW_ANY_CHAIN=1 to bypass this check (not recommended).');
   }
 
   let explorerUrl = process.env.EXPLORER_URL?.trim() || null;

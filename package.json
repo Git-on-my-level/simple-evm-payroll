@@ -8,7 +8,8 @@
     "simple-evm-payroll": "index.js"
   },
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "dry-run": "node index.js --dry-run"
   },
   "engines": {
     "node": ">=18"

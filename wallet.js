@@ -45,10 +45,9 @@ export class WalletManager {
   async assertChainId(expectedChainId) {
     if (expectedChainId == null) return;
     const network = await this.provider.getNetwork();
-    const actual = Number(network.chainId);
-    if (actual !== expectedChainId) {
+    if (network.chainId !== BigInt(expectedChainId)) {
       throw new Error(
-        `RPC chain ID is ${actual} but CHAIN_ID is set to ${expectedChainId}. ` +
+        `RPC chain ID is ${network.chainId} but CHAIN_ID is set to ${expectedChainId}. ` +
         'Refusing to continue to avoid sending on the wrong network.'
       );
     }
@@ -139,6 +138,13 @@ export class VaultWalletManager extends WalletManager {
     );
 
     if (allowance < assetAmountRaw) {
+      // Some tokens (e.g. USDT) revert when changing a non-zero allowance to
+      // another non-zero value, so reset to zero first when needed.
+      if (allowance > 0n) {
+        const resetTx = await assetTokenManager.tokenContract.approve(this.tokenAddress, 0n, this.gasOverrides);
+        console.log('Resetting existing allowance to zero...');
+        await resetTx.wait();
+      }
       console.log('Approving vault to pull the asset for deposit...');
       const approveTx = await assetTokenManager.tokenContract.approve(
         this.tokenAddress,

@@ -39,11 +39,12 @@ cp .env.example .env
 | `PRIVATE_KEY` | yes | Sender wallet private key (`0x` prefix optional). |
 | `RPC_URL` | yes | JSON-RPC endpoint for the target network. |
 | `TOKEN_ADDRESS` | yes | ERC20 token to distribute (input amounts are in this token). |
+| `CHAIN_ID` | yes | Expected chain ID; the run aborts if the RPC reports a different network. Set `ALLOW_ANY_CHAIN=1` to bypass (not recommended). |
 | `VAULT_ADDRESS` | no | ERC4626 vault whose `asset()` is `TOKEN_ADDRESS`. Enables the vault payout option. |
-| `CHAIN_ID` | recommended | Expected chain ID; the run aborts if the RPC reports a different network. |
 | `EXPLORER_URL` | no | Block explorer tx URL prefix for printing links. |
 | `MAX_FEE_PER_GAS_GWEI` | no | EIP-1559 max fee override (gwei). |
 | `MAX_PRIORITY_FEE_PER_GAS_GWEI` | no | EIP-1559 priority fee override (gwei). |
+| `DRY_RUN` | no | Set to `1` to force a dry run without the `--dry-run` flag. |
 
 ## Usage
 
@@ -51,11 +52,21 @@ cp .env.example .env
 node index.js <recipients-file> [--dry-run]
 ```
 
-Or via npm:
+Always dry-run first:
 
 ```bash
-npm start -- recipients.tsv
+node index.js recipients.tsv --dry-run
 ```
+
+> ⚠️ **npm and flags:** `npm start recipients.tsv --dry-run` does **not** pass
+> `--dry-run` to the script (npm consumes it), so it would run **live**. When
+> using npm, put args after `--`:
+>
+> ```bash
+> npm start -- recipients.tsv --dry-run   # or: npm run dry-run -- recipients.tsv
+> ```
+>
+> To be safe you can also force a dry run via the environment: `DRY_RUN=1`.
 
 Options:
 
@@ -63,6 +74,30 @@ Options:
   conversion) without sending a single transaction. Recommended before every
   real run.
 - `-h`, `--help` — show usage.
+
+A real run prints a clear `⚠️ LIVE RUN` banner before asking for confirmation,
+so you can tell at a glance whether transactions will actually be sent.
+
+## Resuming and re-running (partial payrolls)
+
+Every confirmed transfer is recorded immediately in
+`<recipients-file>.journal.json` (git-ignored). On any subsequent run, recipients
+already paid **for the same amount and token** are skipped and shown under
+`ALREADY PAID — SKIPPING`, and balance/total calculations cover only the
+remaining recipients.
+
+This makes runs idempotent and resumable:
+
+- If a run is interrupted, just run it again — completed payments are skipped.
+- If some transfers failed (e.g. a permissioned token reverted for a recipient,
+  or a recipient was temporarily out of gas allowance), fix the underlying issue
+  and re-run; only the outstanding recipients are attempted.
+- If you change a recipient's amount in the file after they were paid, the tool
+  warns and treats it as a new payment rather than silently skipping.
+
+The journal is scoped per input file, chain, and payment token; a journal from a
+different chain/token is ignored. To start completely fresh, delete the
+`.journal.json` file.
 
 ### What the script does
 
@@ -111,7 +146,11 @@ hard error (no silent rounding).
 - **Addresses are checksum-validated** and duplicates are rejected, but the tool
   cannot know if an address is *correct* — verify your source data.
 - Transfers are sent **one at a time**; if one fails the rest still proceed, and
-  the summary lists failures for retry.
+  the summary lists failures for retry. Re-running skips already-confirmed
+  payments (see [Resuming](#resuming-and-re-running-partial-payrolls)).
+- **Permissioned tokens** (e.g. allowlisted stablecoins) may revert transfers to
+  non-approved recipients. Such failures are reported per-recipient; ensure
+  recipients are eligible to receive the token before running.
 
 ## How it works (files)
 
@@ -121,9 +160,11 @@ hard error (no silent rounding).
 | `config.js` | Environment loading and validation. |
 | `wallet.js` | ERC20 / ERC4626 wallet managers (ethers). |
 | `utils.js` | Recipients-file parsing and validation. |
+| `journal.js` | Write-through payment ledger for resumable runs. |
 | `display.js` | Console previews and tables. |
 | `prompt.js` | Interactive confirmations. |
 | `executor.js` | Sequential transfer execution and summary. |
+| `errors.js` | Concise error formatting. |
 
 ## License
 

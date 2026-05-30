@@ -6,10 +6,15 @@ node_modules/
 # Real recipient lists may contain sensitive payout data. Keep them local.
 # The committed example file is explicitly allowed below.
 *payroll*.txt
+*payroll*.tsv
+*payroll*.csv
 recipients*.txt
 recipients*.tsv
 recipients*.csv
 !recipients.example.tsv
+
+# Per-run payment journals (contain payout addresses, amounts, and tx hashes).
+*.journal.json
 
 .claude/
 .DS_Store

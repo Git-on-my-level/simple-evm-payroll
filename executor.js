@@ -1,7 +1,8 @@
 import { displayTransactionResult } from './display.js';
 import { formatUnits } from './wallet.js';
+import { formatError } from './errors.js';
 
-export async function executeTransactions(walletManager, transactions, tokenInfo, explorerUrl) {
+export async function executeTransactions(walletManager, transactions, tokenInfo, explorerUrl, journal = null) {
   const results = [];
 
   for (let i = 0; i < transactions.length; i++) {
@@ -14,6 +15,15 @@ export async function executeTransactions(walletManager, transactions, tokenInfo
 
       console.log('Transaction submitted, waiting for confirmation...');
       const receipt = await txResponse.wait();
+
+      // Persist immediately so an interruption after this point is recoverable.
+      if (journal) {
+        journal.record(tx.address, {
+          inputRaw: tx.inputRaw,
+          payoutRaw: tx.payoutRaw,
+          txHash: receipt.hash
+        });
+      }
 
       displayTransactionResult(
         i,
@@ -35,8 +45,9 @@ export async function executeTransactions(walletManager, transactions, tokenInfo
         gasUsed: receipt.gasUsed.toString()
       });
     } catch (error) {
+      const reason = formatError(error);
       console.error(`❌ Failed to send ${tx.payoutFormatted} ${tokenInfo.symbol} to ${tx.address}`);
-      console.error(`Error: ${error.message}\n`);
+      console.error(`Error: ${reason}\n`);
 
       results.push({
         success: false,
@@ -44,7 +55,7 @@ export async function executeTransactions(walletManager, transactions, tokenInfo
         inputRaw: tx.inputRaw,
         payoutRaw: tx.payoutRaw,
         payoutFormatted: tx.payoutFormatted,
-        error: error.message
+        error: reason
       });
     }
   }
@@ -69,7 +80,7 @@ export function displayFinalSummary(results, tokenInfo) {
   }
 
   if (failed.length > 0) {
-    console.log('\nFailed transactions:');
+    console.log('\nFailed transactions (safe to re-run; confirmed payments are skipped):');
     failed.forEach(r => {
       console.log(`- ${r.address}: ${r.payoutFormatted} ${tokenSymbol} (${r.error})`);
     });

@@ -7,13 +7,19 @@ function ask(question) {
       output: process.stdout
     });
 
-    rl.question(question, (answer) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
       rl.close();
-      resolve(answer.trim());
-    });
+      resolve(value.trim());
+    };
 
-    // If stdin closes (EOF / piped input exhausted), resolve empty rather than hang.
-    rl.on('close', () => resolve(''));
+    rl.question(question, finish);
+
+    // If stdin closes (EOF / piped input exhausted), resolve empty rather than
+    // hang. Guarded so a normal answer is never overwritten by the close event.
+    rl.on('close', () => finish(''));
   });
 }
 
