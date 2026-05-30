@@ -17,6 +17,12 @@ const ERC4626_ABI = [
   'function deposit(uint256 assets, address receiver) returns (uint256)'
 ];
 
+// Pad the estimated gas to absorb state-dependent variance. aTokens and other
+// hook-bearing tokens run extra logic on transfer (e.g. the lending pool's
+// finalizeTransfer), and a bare estimate can land just below actual usage,
+// causing an out-of-gas revert. 25% headroom comfortably covers this.
+const GAS_LIMIT_BUFFER_PCT = 125n;
+
 export function formatUnits(amount, decimals) {
   return ethers.formatUnits(amount, decimals);
 }
@@ -74,8 +80,25 @@ export class WalletManager {
     };
   }
 
+  /**
+   * Builds transaction overrides (configured gas fees plus a buffered gasLimit).
+   * If estimation fails, omits gasLimit and lets the node estimate, so the real
+   * revert reason surfaces rather than a confusing estimation error.
+   */
+  async buildOverrides(methodName, args) {
+    const overrides = { ...this.gasOverrides };
+    try {
+      const estimate = await this.tokenContract[methodName].estimateGas(...args, this.gasOverrides);
+      overrides.gasLimit = (estimate * GAS_LIMIT_BUFFER_PCT) / 100n;
+    } catch {
+      // Leave gasLimit unset; the subsequent send will surface any real error.
+    }
+    return overrides;
+  }
+
   async sendTokenRaw(toAddress, amountRaw) {
-    return this.tokenContract.transfer(toAddress, amountRaw, this.gasOverrides);
+    const overrides = await this.buildOverrides('transfer', [toAddress, amountRaw]);
+    return this.tokenContract.transfer(toAddress, amountRaw, overrides);
   }
 
   async checkWalletActivity(address) {
@@ -141,20 +164,23 @@ export class VaultWalletManager extends WalletManager {
       // Some tokens (e.g. USDT) revert when changing a non-zero allowance to
       // another non-zero value, so reset to zero first when needed.
       if (allowance > 0n) {
-        const resetTx = await assetTokenManager.tokenContract.approve(this.tokenAddress, 0n, this.gasOverrides);
+        const resetOverrides = await assetTokenManager.buildOverrides('approve', [this.tokenAddress, 0n]);
+        const resetTx = await assetTokenManager.tokenContract.approve(this.tokenAddress, 0n, resetOverrides);
         console.log('Resetting existing allowance to zero...');
         await resetTx.wait();
       }
       console.log('Approving vault to pull the asset for deposit...');
+      const approveOverrides = await assetTokenManager.buildOverrides('approve', [this.tokenAddress, assetAmountRaw]);
       const approveTx = await assetTokenManager.tokenContract.approve(
         this.tokenAddress,
         assetAmountRaw,
-        this.gasOverrides
+        approveOverrides
       );
       console.log('Approval submitted, waiting for confirmation...');
       await approveTx.wait();
     }
 
-    return this.tokenContract.deposit(assetAmountRaw, this.wallet.address, this.gasOverrides);
+    const depositOverrides = await this.buildOverrides('deposit', [assetAmountRaw, this.wallet.address]);
+    return this.tokenContract.deposit(assetAmountRaw, this.wallet.address, depositOverrides);
   }
 }
